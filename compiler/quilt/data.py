@@ -28,6 +28,36 @@ from .tools.store import PackageStore
 __path__ = []  # Required for submodules to work
 
 
+import importlib
+def quilt_patch_open(module_name, func_name):
+    """monkeypatch an open-like function (that takes a filename as the first argument)
+    to rewrite that filename to the equivalent in Quilt's objs/ directory.  This is
+    beneficial for taking advantage of Quilt (file dedup, indexing, reproducibility,
+    versioning, etc) without needing to rewrite code that wants to read its data from
+    files."""
+    try:
+        from unittest.mock import patch   # Python3
+    except:
+        from mock import patch  # Python2
+        if module_name == 'builtins':
+            module_name = '__builtin__'
+
+    module = importlib.import_module(module_name)
+    original_func = getattr(module, func_name)
+    patcher = None
+    def patch_func(filename, *args, **kwargs):
+        patcher.stop()
+        # TODO: add logic to redirect to quilt_packages/objs/...
+        # TODO: detect quilt's own open() calls and don't redirect
+        try:
+            print("quilt_patch_open() called with: {}".format(filename))
+            res = getattr(module, func_name)(filename, *args, **kwargs)
+        finally:
+            patcher.start()
+        return res
+    patcher = patch(module_name+'.'+func_name, patch_func)
+    patcher.start()
+
 class FakeLoader(object):
     """
     Fake module loader used to create intermediate user and package modules.
@@ -105,6 +135,14 @@ class ModuleFinder(object):
         submodule = fullname[len(__name__) + 1:]
         parts = submodule.split('.')
 
+        # TODO/HACK: replace "from quilt.data.vfs__foo" with "from quilt.vfs.foo"
+        if parts[0].startswith("vfs__"):
+            parts[0] = parts[0][len("vfs__"):]
+            quilt_patch_open('builtins', 'open')
+            quilt_patch_open('h5py', 'File') # for keras/tensorflow
+            quilt_patch_open('bz2', 'BZ2File')
+            quilt_patch_open('gzip', 'GzipFile')
+        
         if len(parts) == 1:
             for store_dir in PackageStore.find_store_dirs():
                 store = PackageStore(store_dir)
